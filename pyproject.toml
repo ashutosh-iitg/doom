@@ -1,0 +1,33 @@
+[project]
+name = "doom"
+version = "0.1.0"
+description = "A panel of judges — starting with a constitutional-classifier-style exchange classifier."
+readme = "README.md"
+authors = [
+    { name = "ashutosh-iitg", email = "ashutoshk167@gmail.com" }
+]
+requires-python = ">=3.13"
+dependencies = [
+    "emissary",
+]
+
+[dependency-groups]
+dev = [
+    "black>=26.5.1",
+    "pytest>=8.3.0",
+    "ruff>=0.16.0",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py313"
+
+[tool.black]
+line-length = 100
+
+[build-system]
+requires = ["uv_build>=0.11.33,<0.12.0"]
+build-backend = "uv_build"
+
+[tool.uv.sources]
+emissary = { path = "../emissary", editable = true }
