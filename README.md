@@ -34,20 +34,53 @@ export VLLM_BASE_URL="http://localhost:8000/v1"
 rules modeled on the paper's CBRN framing (including its reconstruction- and
 obfuscation-attack analysis from §2), not a production policy.
 
+## The two-stage cascade (paper §4)
+
+Running the expensive judge on every exchange is what §4 exists to avoid. A
+cheap `Screen` scores all traffic and only suspicious exchanges reach the
+judge:
+
+```python
+from doom import Cascade, ExchangeClassifier, Screen
+from doom.constitutions.cbrn_example import CBRN_EXAMPLE
+import emissary
+
+cascade = Cascade(
+    screen=Screen(emissary.parse_spec("vllm:my-local-model")),  # one token
+    judge=ExchangeClassifier(),                                  # full verdict
+    constitution=CBRN_EXAMPLE,
+    threshold=0.15,
+)
+
+out = cascade.evaluate(exchange)
+out.flagged      # the decision
+out.score        # what the screen thought (kept on both routes)
+out.escalated    # whether the judge ever saw it
+```
+
+The screen generates **one token** and scores it from the model's own
+logprobs — not from asking the model to rate its own confidence, which isn't
+calibrated. That means the screen needs a logprob-capable provider: a local
+vLLM model or OpenAI. **The Anthropic API exposes no logprobs**, so a Claude
+model can't be the screen; `emissary.call_choice` refuses it rather than
+degrading silently.
+
+Because a flagged exchange is *escalated, not refused*, the screen is
+deliberately biased toward flagging — a false positive costs one extra judge
+call and nothing else. `threshold` is the compute/robustness knob: lower it
+and more traffic escalates.
+
+> The default `threshold` of 0.15 is a placeholder. A real value comes from
+> measuring escalation and missed-violation rates on labelled exchanges.
+
 ## Where this goes next
 
-`Panel` (`src/doom/panel.py`) holds a sequence of judges today and flags if
-any one does — deliberately thin. The paper's later sections are the
-roadmap for what grows in front of `Panel.evaluate`, without changing
-`Verdict` or `ExchangeClassifier`:
-
-- §4 — a cheap first-stage judge screens every exchange; only flagged ones
-  escalate to an expensive second-stage judge.
-- §5 — linear probes reading a *local* model's activations mid-generation
-  (this is the other reason `emissary`'s vLLM support matters: probes need
-  access to an open-weight model's internals, which an API-only provider
-  can't give you).
-- §6 — a weighted ensemble of probe and classifier scores.
+- **§5** — linear probes reading a local model's activations mid-generation.
+  A probe exposes the same `exchange → score` interface `Screen` does, so it
+  drops into stage 1 without touching `Cascade`. (An off-the-shelf safety
+  classifier served via vLLM is the cheaper step on the way there.)
+- **§6** — a weighted ensemble of probe and classifier scores, which is why
+  `CascadeVerdict` keeps the screen's score even after escalating.
 
 ## Development
 

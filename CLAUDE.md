@@ -117,15 +117,21 @@ numbers below refer to it.
 
 ## Where the project actually is
 
-Built and tested: the paper's **§3 exchange classifier**, at the prompting level.
-`ExchangeClassifier.judge` sends one full exchange plus a constitution to a judge
-model and gets back a structured `Verdict`. `Panel` holds a sequence of judges
-and flags if any one does.
+Built and tested (mocked): the paper's **§3 exchange classifier** and the **§4
+two-stage cascade**. `ExchangeClassifier.judge` sends one full exchange plus a
+constitution to a judge model and gets back a structured `Verdict`. `Screen`
+scores an exchange from one token's logprobs; `Cascade` routes on that score.
+`Panel` holds a sequence of judges and flags if any one does.
 
-Not built: everything else in the paper. Do not describe this repo as
-implementing Constitutional Classifiers — it implements the simplest of the four
-systems the paper compares, without the fine-tuning, cascade, or probes that
-make the production version what it is.
+Not built: the fine-tuning behind the paper's classifiers, §5's linear probes,
+and §6's ensemble. Do not describe this repo as implementing Constitutional
+Classifiers — the judges here are *prompted*, not fine-tuned, which is the
+single biggest gap against the paper's numbers.
+
+**Nothing in this repo has ever run against a live model.** There is no vLLM
+server and no funded API key, so `Screen.score` in particular is verified only
+against hand-built logprob payloads. Do not claim the cascade works end to end
+until someone runs it.
 
 ## The shape
 
@@ -134,13 +140,22 @@ exchange.py       Exchange, Turn — the conversation under evaluation
 constitution.py   Constitution, Rule — the ruleset judged against
 constitutions/    cbrn_example.py — ILLUSTRATIVE ONLY, not policy
 verdict.py        Verdict — flagged, reasoning, rule_ids
-judge.py          ExchangeClassifier — one prompted judge, via emissary
-panel.py          Panel — sequence of judges; the seam for what comes next
+judge.py          ExchangeClassifier — stage 2: one prompted judge, tool-forced
+screen.py         Screen — stage 1: one token, scored from logprobs
+cascade.py        Cascade — threshold routing; CascadeVerdict records the route
+panel.py          Panel — sequence of judges; the seam for §6's ensemble
 ```
 
-Data flow: `Exchange` + `Constitution` → `ExchangeClassifier.judge` → one
-tool-forced `emissary.call_tool` → `Verdict`. `Panel` fans that over several
-judges. Nothing here holds state between calls.
+Two data flows, by cost:
+
+- **Screen** (every exchange): `Exchange` + `Constitution` →
+  `emissary.call_choice` → one generated token, scored from its logprobs → a
+  float in [0, 1].
+- **Judge** (escalated only): `Exchange` + `Constitution` →
+  `emissary.call_tool` → `Verdict` with reasoning and rule ids.
+
+`Cascade` runs the first and, above `threshold`, the second. Nothing here
+holds state between calls.
 
 ## Decisions — do not re-open without new information
 
@@ -164,10 +179,35 @@ in the repo that earns its keep: it is what makes §4's cascade and §6's ensemb
 additive rather than a rewrite.
 
 **`Panel` is deliberately thin — flag if any judge flags.** It is not a cascade
-and does not pretend to be. §4 (cheap judge screens, expensive judge escalates)
-and §6 (weighted probe + classifier logits) belong in a routing policy *in front
-of* `Panel.evaluate`, leaving `Verdict` and `ExchangeClassifier` untouched.
-Adding weighting or routing to `Panel` itself would couple the two.
+and does not pretend to be. §6 (weighted probe + classifier logits) belongs in a
+policy *in front of* `Panel.evaluate`, leaving `Verdict` and
+`ExchangeClassifier` untouched. Adding weighting to `Panel` itself would couple
+the two. `Cascade` is exactly that shape and is what §4 turned out to need.
+
+**The screen scores from logprobs, never from self-reported confidence.** The
+paper's cascade thresholds a classifier's logits; the faithful analogue for a
+prompted judge is to generate one constrained token and read the probability
+the model actually assigned it. Asking a model "how confident are you, 0-1?"
+returns a number that is not calibrated, and thresholding it only looks like
+measurement. This is the reason `Screen` cannot use the Anthropic API at all:
+**it exposes no logprobs** — no parameter, no derivation — so the screen needs
+a locally served open-weight model (`vllm:<model>`) or OpenAI.
+`emissary.call_choice` refuses an Anthropic spec explicitly rather than
+silently degrading.
+
+**Escalation is not refusal, and that asymmetry is load-bearing.** A flagged
+exchange costs one extra judge call; nothing is blocked on the screen's word.
+That is what lets the screening prompt be deliberately recall-biased ("when
+unsure, FLAG") without the false-positive cost a refusing classifier would
+face — and in turn what lets stage 1 be small and cheap. `CascadeVerdict`
+records `escalated` alongside the verdict because "the judge cleared it" and
+"the screen never sent it" are both `flagged=False` and must stay
+distinguishable when auditing flag rates.
+
+**`DEFAULT_THRESHOLD = 0.15` is a guess, not a calibration.** A real value
+comes from measuring escalation rate and missed-violation rate against
+labelled exchanges. Treat the constant as a placeholder that happens to lean
+the right way (low, per §4's "flag the vast majority of known-bad examples").
 
 **The constitution is cache-marked; the exchange is not.** The constitution is
 identical across every exchange a judge evaluates, the exchange is unique per
@@ -180,14 +220,22 @@ what is disallowed and why — never operational detail.
 
 ## Roadmap — the paper's later sections, in order
 
-- **§4** two-stage cascade: a cheap first-stage judge screens all traffic; only
-  flagged exchanges reach an expensive second stage. Escalating rather than
-  refusing is what lets stage one tolerate a high false-positive rate.
+- **§4 two-stage cascade — built** (`cascade.py`, `screen.py`), unverified
+  against a live model. The open work is calibration: measure escalation rate
+  and missed-violation rate on labelled exchanges and set `threshold` from
+  that rather than from the placeholder constant.
 - **§5** linear probes over a local open-weight model's activations, with
-  sliding-window logit smoothing and softmax-weighted loss. This needs model
-  internals, which is why `emissary`'s vLLM support matters — an API-only
-  provider cannot give you activations.
-- **§6** weighted ensemble of probe and classifier scores.
+  sliding-window logit smoothing and softmax-weighted loss. Needs model
+  internals, which is why vLLM matters — an API-only provider cannot give you
+  activations. A probe drops straight into stage 1: it exposes the same
+  `exchange → score in [0,1]` interface `Screen` already has, so `Cascade`
+  needs no change. An off-the-shelf safety classifier or a fine-tuned
+  cross-encoder served via vLLM is the cheaper intermediate step on the way
+  there, and fits the same seam.
+- **§6** weighted ensemble of probe and classifier scores
+  (`z = α·z_probe + (1−α)·z_classifier`). This is the first thing that needs
+  scores from *both* stages, which is why `CascadeVerdict` keeps the screen's
+  score even on escalated exchanges.
 
 ## Testing
 
