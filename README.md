@@ -1,7 +1,7 @@
 # doom
 
 A panel of judges. Starting point: a constitutional classifier in the sense
-of [Cunningham et al., *Constitutional Classifiers++*](2601.04603v1.pdf) —
+of [Cunningham et al., *Constitutional Classifiers++*](https://arxiv.org/abs/2601.04603) —
 specifically the paper's **exchange classifier** (§3): a judge that
 evaluates a full conversational exchange, in context, against a fixed set of
 rules, rather than examining the request and the response separately (which
@@ -105,3 +105,38 @@ print(judge.judge(BENIGN_EXCHANGE, CBRN_EXAMPLE))
 print(judge.judge(FLAGGED_EXCHANGE, CBRN_EXAMPLE))
 "
 ```
+
+> **Status:** nothing here has run against a live model yet. The tests are
+> fully mocked, and `Screen`'s logprob scoring is verified only against
+> hand-built response payloads.
+
+## Reference
+
+This project implements ideas from:
+
+> Hoagy Cunningham, Jerry Wei, Zihan Wang, Andrew Persic, Alwin Peng, Jordan
+> Abderrachid, et al. **Constitutional Classifiers++: Efficient
+> Production-Grade Defenses against Universal Jailbreaks.** arXiv:2601.04603
+> [cs.CR], January 2026. <https://arxiv.org/abs/2601.04603>
+
+```bibtex
+@article{cunningham2026constitutional,
+  title   = {Constitutional Classifiers++: Efficient Production-Grade
+             Defenses against Universal Jailbreaks},
+  author  = {Cunningham, Hoagy and Wei, Jerry and Wang, Zihan and
+             Persic, Andrew and Peng, Alwin and Abderrachid, Jordan and
+             Perez, Ethan and Sharma, Mrinank},
+  journal = {arXiv preprint arXiv:2601.04603},
+  year    = {2026},
+  url     = {https://arxiv.org/abs/2601.04603}
+}
+```
+
+The paper is the authors' work and is not distributed with this repository —
+fetch it from arXiv. This repository's own code is MIT licensed (see
+[LICENSE](LICENSE)); the `constitutions/cbrn_example.py` ruleset is an
+illustrative example written for testing, not a production safety policy.
+
+## License
+
+[MIT](LICENSE) © ashutosh-iitg

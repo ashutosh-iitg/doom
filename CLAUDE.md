@@ -111,9 +111,10 @@ noise and should be deleted.
 # Project context
 
 **doom** is a panel of judges for evaluating model behaviour. It starts from
-Cunningham et al., *Constitutional Classifiers++* (`2601.04603v1.pdf`, in this
-repo) — **read the paper before changing the judging architecture**; the section
-numbers below refer to it.
+Cunningham et al., *Constitutional Classifiers++* (arXiv:2601.04603,
+<https://arxiv.org/abs/2601.04603>) — **read the paper before changing the
+judging architecture**; the section numbers below refer to it. The PDF is not
+tracked in this repo; fetch it from arXiv.
 
 ## Where the project actually is
 

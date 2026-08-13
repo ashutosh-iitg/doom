@@ -3,6 +3,8 @@ name = "doom"
 version = "0.1.0"
 description = "A panel of judges — starting with a constitutional-classifier-style exchange classifier."
 readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
 authors = [
     { name = "ashutosh-iitg", email = "ashutoshk167@gmail.com" }
 ]
