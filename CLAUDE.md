@@ -118,16 +118,35 @@ tracked in this repo; fetch it from arXiv.
 
 ## Where the project actually is
 
-Built and tested (mocked): the paper's **§3 exchange classifier** and the **§4
-two-stage cascade**. `ExchangeClassifier.judge` sends one full exchange plus a
+Built and tested (mocked): the paper's **§3 exchange classifier**, the **§4
+two-stage cascade** (routing logic and a calibration harness), **§5's linear
+probe** (PyTorch, frozen backbone + trained head), and **§6's weighted
+ensemble**. `ExchangeClassifier.judge` sends one full exchange plus a
 constitution to a judge model and gets back a structured `Verdict`. `Screen`
 scores an exchange from one token's logprobs; `Cascade` routes on that score.
 `Panel` holds a sequence of judges and flags if any one does.
 
-Not built: the fine-tuning behind the paper's classifiers, §5's linear probes,
-and §6's ensemble. Do not describe this repo as implementing Constitutional
-Classifiers — the judges here are *prompted*, not fine-tuned, which is the
-single biggest gap against the paper's numbers.
+**§4/§5/§6 are code-complete but unverified against anything real** — see the
+per-section notes in the Roadmap below. None of them has run against a real
+labelled dataset, a real backbone, or a real threshold sweep; every test is
+mocked or uses hand-built synthetic data, same as §3.
+
+Not built: the fine-tuning behind the paper's classifiers. Do not describe
+this repo as implementing Constitutional Classifiers — the judges here are
+*prompted*, not fine-tuned, which is the single biggest gap against the
+paper's numbers. That gap is unaffected by §4/§5/§6 being code-complete.
+
+**A second judge family, `doom.jury`, is also built and tested (mocked).**
+It implements Wang, Singh, Gao, Matsoukas, Liu, Namazifar (Amazon AGI),
+*Reasoning Jury: Multi-Model Consensus for Evaluating Reasoning Traces*
+(arXiv:2608.12585) — a genuinely different question from §3–§6 ("where does
+this reasoning trace go wrong", not "does this exchange violate a policy"),
+over a different input/output shape, so it lives as its own module tree
+sharing no types with `constitution.py`/`verdict.py`/`panel.py`/`cascade.py`.
+Like §4/§5/§6, it is code-complete and mock-tested only — no real juror, no
+real moderator, no real deliberation has ever run. See the "Decisions"
+section below for why it's structured this way, and "The shape" for its
+file layout.
 
 **Nothing in this repo has ever run against a live model.** There is no vLLM
 server and no funded API key, so `Screen.score` in particular is verified only
@@ -145,6 +164,27 @@ judge.py          ExchangeClassifier — stage 2: one prompted judge, tool-force
 screen.py         Screen — stage 1: one token, scored from logprobs
 cascade.py        Cascade — threshold routing; CascadeVerdict records the route
 panel.py          Panel — sequence of judges; the seam for §6's ensemble
+dataset.py        LabelledExchange — the one labelled-exchange shape §4 and §5 both read
+calibration.py    sweep_thresholds — measures Cascade.threshold instead of guessing it
+ensemble.py       EnsembleScreen — §6: alpha * probe.score + (1 - alpha) * screen.score
+probe/            §5's linear probe — PyTorch, opt-in (see "Dependencies" below):
+                    backbone.py  frozen HF causal LM, one forward pass, hidden states out
+                    head.py      ProbeHead — the trained half; safetensors + MANIFEST.json
+                    data.py      activation cache over parquet (extract_and_cache/load_cached)
+                    train.py     CLI training loop (warmup+cosine LR, non-finite hard-stop)
+                    probe.py     LinearProbe — combines backbone+head into Screen's own shape
+jury/             Reasoning Jury — a second, sibling judge family (reasoning-trace
+                  quality, not policy compliance); no new dependency, not re-exported
+                  from doom/__init__.py:
+                    trace.py         segment_trace + ReasoningTrace (problem/steps/solution)
+                    defect.py        Defect — one shape for Phase 1 and Phase 2 findings
+                    verdict.py       JuryVerdict — the unifying Phase 2 output
+                    phase1.py        Juror — independent judgement + deliberation turns
+                    consolidation.py Consolidator — Phase 2's single-call consensus mode
+                    deliberation.py  Moderator + Deliberator — the multi-turn debate mode
+                    jury.py          ReasoningJury — Phase 1 fan-out, then delegates to
+                                     whichever Phase 2 policy (Consolidator/Deliberator)
+                                     it's given
 ```
 
 Two data flows, by cost:
@@ -219,35 +259,142 @@ modelled on the paper's CBRN framing so the classifier is runnable end to end.
 It is not a production policy and must never be presented as one. Rules name
 what is disallowed and why — never operational detail.
 
+**§5's activation access lives entirely inside `doom`, not `emissary`.**
+`emissary` has exactly two wire adapters (`anthropic_wire.py`,
+`openai_wire.py`), both HTTP calls to a remote or local API — `vllm` there
+means vLLM's OpenAI-compatible HTTP server, never the vLLM Python API or a
+direct `transformers` model load. Reading hidden states needs an in-process
+forward pass over local model weights: a different transport, not another
+wire format. Bolting that onto `emissary` would force every consumer
+(including `stria`) to carry a torch/transformers stack they don't need, so
+`probe/backbone.py` loads a local HF model directly and is doom's only place
+that imports torch — kept out of `doom/__init__.py`'s eager exports (and
+`ensemble.py` is typed structurally against `calibration.ScreenLike` instead
+of importing `LinearProbe` by name), so `import doom` never requires torch.
+
+**§6 combines `Screen` + the probe, not the judge + the probe.** The paper's
+`z = α·z_probe + (1−α)·z_classifier` needs two continuous scores.
+`ExchangeClassifier` is prompted and tool-forced — it returns a boolean
+`Verdict`, and the same objection `screen.py` already makes against
+self-reported confidence applies to giving the judge a confidence field for
+this purpose. `Screen` already has a real logprob-derived score, so that's
+the classifier side of the blend in this codebase.
+
+**Reasoning Jury (`doom.jury`) is a separate module tree, not an extension
+of `Verdict`/`Panel`/`Cascade`.** It answers a different question ("where
+does this reasoning trace go wrong", not "does this exchange violate a
+policy") over a different input (`problem`/segmented trace/`final_solution`,
+not `Exchange`+`Constitution`) and a structurally richer output (a *list* of
+step-grounded, severity-tagged, evidence-backed defects, not one boolean
+`Verdict`). Forcing it into the existing types would overload the one
+abstraction this file already calls out as load-bearing specifically because
+it's uniform and simple.
+
+**One `Defect` type serves both Phase 1 and Phase 2** — not a parallel
+raw/consensus type hierarchy. `vote_count`/`voters` default to "not
+applicable" (`0`/`()`) until a Phase 2 policy has actually run, the same
+"uniform shape, meaningful defaults" move `Verdict` itself makes.
+
+**`Consolidator` and `Deliberator` are duck-typed as one `Phase2Policy`
+shape** (`run(trace, phase1) -> JuryVerdict`) — the same structural-typing
+move already used for `Screen`/`LinearProbe`/`EnsembleScreen` via
+`calibration.ScreenLike`. A policy is swapped by passing a different object,
+never by branching on a mode flag.
+
+**Deliberation's juror-contribution call is a single-field tool call, not a
+new emissary capability.** `emissary` exposes no free-text completion call
+(only `call_choice` for one token and `call_tool` for tool-forced structured
+output) — the same reason §5's activation access stays inside `doom`, not
+`emissary`, applies here too: adapting to what emissary already offers beats
+growing a shared dependency for one call site.
+
+**Fault tolerance (paper Appendix F) degrades without hiding it.** A juror
+failing during deliberation has its turn skipped and is dropped after
+repeated consecutive failures; a moderator failure falls back to
+deterministic round-robin; `ReasoningJury` proceeds on a Phase 1 juror
+failure as long as a configured minimum still succeeds. None of this is
+silent — every dropped juror ends up in `JuryVerdict.failed_jurors`.
+Deliberately **not** built: exponential backoff on API throttling (a
+transport concern `emissary` doesn't implement either), a wall-clock ceiling
+on the Phase 1 fan-out, and the optional grounding-checker/evidence-arbiter
+mechanisms the paper mentions only in passing as opt-in extensions beyond
+its core pipeline.
+
 ## Roadmap — the paper's later sections, in order
 
 - **§4 two-stage cascade — built** (`cascade.py`, `screen.py`), unverified
-  against a live model. The open work is calibration: measure escalation rate
-  and missed-violation rate on labelled exchanges and set `threshold` from
-  that rather than from the placeholder constant.
-- **§5** linear probes over a local open-weight model's activations, with
-  sliding-window logit smoothing and softmax-weighted loss. Needs model
-  internals, which is why vLLM matters — an API-only provider cannot give you
-  activations. A probe drops straight into stage 1: it exposes the same
-  `exchange → score in [0,1]` interface `Screen` already has, so `Cascade`
-  needs no change. An off-the-shelf safety classifier or a fine-tuned
-  cross-encoder served via vLLM is the cheaper intermediate step on the way
-  there, and fits the same seam.
-- **§6** weighted ensemble of probe and classifier scores
-  (`z = α·z_probe + (1−α)·z_classifier`). This is the first thing that needs
-  scores from *both* stages, which is why `CascadeVerdict` keeps the screen's
-  score even on escalated exchanges.
+  against a live model. `calibration.py::sweep_thresholds` now measures
+  escalation rate and missed-violation rate across candidate thresholds given
+  a `Screen` and labelled exchanges — but it has only ever been run against
+  the small synthetic fixtures in its own tests. `DEFAULT_THRESHOLD` is still
+  the placeholder constant; setting a real value needs a real labelled
+  dataset run through the sweep, which has not happened.
+- **§5 linear probe — built** (`probe/`), in PyTorch, per project decision
+  (see "Decisions" above: activation access lives in `doom`, not `emissary`,
+  because emissary's wire adapters are HTTP-only and cannot expose hidden
+  states). `Backbone` runs one frozen forward pass over a local HF
+  `transformers` causal LM (`DOOM_PROBE_BACKBONE` env var) and pools the
+  last-token hidden state; `ProbeHead` is a linear-or-shallow-MLP trained on
+  cached activations (`train.py`, safetensors + MANIFEST.json checkpoints);
+  `LinearProbe` exposes the same `exchange, constitution → score in [0,1]`
+  shape `Screen` has, so it drops into `Cascade` with no change to `Cascade`
+  itself. **Never run against a real backbone or real labelled data** — the
+  training loop is verified with a real (but tiny, synthetic, CPU) training
+  run in `tests/probe/test_train.py`; `Backbone` itself is exercised only on
+  its pooling logic, never a real model download. The paper's sliding-window
+  logit smoothing and softmax-weighted loss are not implemented — this is a
+  plain linear probe, not the paper's full §5 recipe. The suggested
+  off-the-shelf-classifier-over-vLLM intermediate step doesn't need new code:
+  point `Screen` at a different `vllm:<model>` with an adapted prompt.
+- **§6 weighted ensemble — built** (`ensemble.py::EnsembleScreen`):
+  `z = alpha * z_probe + (1 - alpha) * z_screen`. Combines `Screen` and the
+  §5 probe, not the probe and `ExchangeClassifier` — the judge is prompted
+  and tool-forced, with no calibrated probability to blend (self-reported
+  confidence is exactly the kind of number `screen.py`'s own docstring
+  already rejects as uncalibrated). `EnsembleScreen` satisfies the same
+  screen interface, so it too drops into `Cascade` unmodified. `alpha` is
+  unset/untuned — that needs both a working probe and labelled data, neither
+  of which exists yet in a real form.
 
 ## Testing
 
-`uv run pytest` — mocked, no network, no key needed. A live end-to-end run needs
-a funded provider credential; the snippet is in `README.md`. **As of the last
-session that run has never been executed** — Kimi was the only key available and
-its account was out of balance. Do not claim end-to-end verification until
-someone actually runs it.
+`uv run pytest` — mocked, no network, no key needed. Everything in `tests/`
+except `tests/probe/` runs with only the `dev` dependency group. A live
+end-to-end run needs a funded provider credential; the snippet is in
+`README.md`. **As of the last session that run has never been executed** —
+Kimi was the only key available and its account was out of balance. Do not
+claim end-to-end verification until someone actually runs it.
+
+`tests/probe/` (§5) needs the optional `probe` dependency group — `uv sync
+--group probe` (pulls in torch/transformers/pyarrow/safetensors). Without it,
+those tests skip cleanly via `pytest.importorskip` rather than failing; `uv
+run pytest` stays green either way. Even with the group installed, this only
+verifies the training/checkpoint/data-cache *logic* on synthetic data and a
+hand-built pooling test — no test in this repo has ever loaded a real
+backbone model.
+
+`tests/jury/` needs no optional group — `doom.jury` has no new dependency.
+Every test mocks `emissary.call_tool` (same pattern as `test_judge.py`) or
+uses stub jurors/moderators (same pattern as `test_cascade.py`'s
+`_StubScreen`); the deliberation turn loop, termination, and every
+fault-tolerance path are exercised this way, with no real model call
+anywhere.
 
 ## Dependencies
 
 `emissary` (editable path dep, `../emissary`) is the only way this repo talks to
-a model. Set `DOOM_JUDGE_PROVIDER` to pick one — including `vllm:<model>` with
-`VLLM_BASE_URL` for a local server.
+a model for the §3/§4 judges. Set `DOOM_JUDGE_PROVIDER` to pick one —
+including `vllm:<model>` with `VLLM_BASE_URL` for a local server.
+
+§5's probe (`doom.probe`) is a separate, optional `probe` dependency group
+(torch, transformers, safetensors, pyarrow) — not a core dependency, and not
+imported by `doom/__init__.py`. `Backbone`'s model comes from
+`DOOM_PROBE_BACKBONE`, matching the `DOOM_JUDGE_PROVIDER`/
+`DOOM_SCREEN_PROVIDER` convention. It does not go through `emissary` at all
+(see the §5 activation-access decision above).
+
+`doom.jury` needs no new dependency — every call routes through
+`emissary.call_tool`, same as `judge.py`. `Juror`'s provider comes from
+`DOOM_JURY_JUROR_PROVIDER`, `Consolidator`/`Moderator`'s from
+`DOOM_JURY_MODERATOR_PROVIDER`, both defaulting to `anthropic` like the
+other provider env vars in this project.
