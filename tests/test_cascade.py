@@ -8,7 +8,7 @@ score itself.
 from unittest.mock import patch
 
 import pytest
-from emissary import ChoiceResult, ProviderError, parse_spec
+from emissary.llm import ChoiceResult, ProviderError, parse_spec
 
 from doom import Cascade, Exchange, Screen, Verdict
 from doom.cascade import CascadeVerdict
@@ -128,18 +128,18 @@ class TestScreen:
             cached_input_tokens=0,
         )
 
-        with patch("emissary.call_choice", return_value=result):
+        with patch("emissary.llm.call_choice", return_value=result):
             assert self._screen().score(EXCHANGE, CBRN_EXAMPLE) == 0.7
 
     def test_the_constitution_is_cache_marked_and_the_exchange_is_not(self):
         result = ChoiceResult({"SAFE": 1.0, "FLAG": 0.0}, "vllm", "m", 1, 1, 0)
 
-        with patch("emissary.call_choice", return_value=result) as called:
+        with patch("emissary.llm.call_choice", return_value=result) as called:
             self._screen().score(EXCHANGE, CBRN_EXAMPLE)
 
         blocks = called.call_args.kwargs["blocks"]
-        assert blocks[0]["cache"] is True
-        assert blocks[1]["cache"] is False
+        assert blocks[0].cache is True
+        assert blocks[1].cache is False
         assert called.call_args.kwargs["labels"] == ["SAFE", "FLAG"]
 
     def test_the_screen_reads_its_provider_from_the_environment(self, monkeypatch):
