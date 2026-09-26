@@ -5,7 +5,7 @@ constitution, rather than examining the input and output separately.
 
 from typing import Any
 
-import emissary
+from emissary import llm
 
 from .constitution import Constitution
 from .exchange import Exchange
@@ -54,25 +54,25 @@ Call `record_verdict` exactly once with your decision."""
 class ExchangeClassifier:
     """One judge: a model prompted to classify a full exchange against a constitution."""
 
-    def __init__(self, spec: emissary.Spec | None = None):
-        self.spec = spec or emissary.resolve_spec(
+    def __init__(self, spec: llm.Spec | None = None):
+        self.spec = spec or llm.resolve_spec(
             env_var="DOOM_JUDGE_PROVIDER", default="anthropic"
         )
 
     def judge(self, exchange: Exchange, constitution: Constitution) -> Verdict:
-        result = emissary.call_tool(
+        result = llm.call_tool(
             self.spec,
             system=SYSTEM_PROMPT,
-            blocks=[
+            blocks=(
                 # The constitution is reused across every exchange this judge
                 # evaluates; the exchange is unique per call — the same
                 # cache-the-reused-part shape stria's extraction calls use.
-                {
-                    "text": f"# Constitution: {constitution.name}\n\n{constitution.render()}",
-                    "cache": True,
-                },
-                {"text": f"# Exchange to evaluate\n\n{exchange.render()}", "cache": False},
-            ],
+                llm.TextBlock(
+                    f"# Constitution: {constitution.name}\n\n{constitution.render()}",
+                    cache=True,
+                ),
+                llm.TextBlock(f"# Exchange to evaluate\n\n{exchange.render()}"),
+            ),
             tool=RECORD_VERDICT_TOOL,
         )
         payload = result.payload
